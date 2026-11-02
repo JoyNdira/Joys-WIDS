@@ -14,6 +14,10 @@ the same schema, so the rest of the system never cares where the frames came fro
 """
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -93,7 +97,7 @@ _ALIASES = {
     "time": ["frame.time_epoch", "frame.time_relative", "time"],
     "src": ["wlan.sa", "wlan.ta"],
     "dst": ["wlan.da", "wlan.ra"],
-    "subtype": ["wlan.fc.type_subtype"],
+    "subtype": ["wlan.fc.type_subtype", "wlan.fc.subtype"],
     "ftype": ["wlan.fc.type"],
     "rssi": ["radiotap.dbm_antsignal", "wlan_radio.signal_dbm"],
     "length": ["frame.len", "frame.cap_len"],
@@ -116,20 +120,62 @@ def _to_mac(s: pd.Series) -> pd.Series:
     return s.mask(s == "")
 
 
+def _natural(p):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(p))]
+
+
 def load_awid3_csv(source, max_rows: int | None = None, skip_rows: int = 0, deauth_only: bool = True):
-    """Read an AWID3 CSV (path or uploaded file). Returns (frames, info)."""
+    """Read an AWID3 CSV file, an uploaded file, or a FOLDER of CSV parts. Returns (frames, info)."""
+    if isinstance(source, (str, os.PathLike)) and os.path.isdir(source):
+        return _load_folder(Path(source), max_rows, skip_rows, deauth_only)
+    return _load_one_csv(source, max_rows, skip_rows, deauth_only)
+
+
+def _load_folder(folder, max_rows, skip_rows, deauth_only):
+    files = sorted((p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() == ".csv"), key=_natural)
+    if not files:
+        raise ValueError(f"No .csv files found in {folder}")
+    frames, used, counts, rows_read, remaining, skip, last = [], [], {}, 0, max_rows, skip_rows, {}
+    for f in files:
+        if remaining is not None and remaining <= 0:
+            break
+        if skip > 0:
+            with open(f, "rb") as fh:
+                n = sum(1 for _ in fh) - 1
+            if skip >= n:
+                skip -= n
+                continue
+        try:
+            fr, info = _load_one_csv(str(f), remaining, skip, deauth_only)
+        except ValueError as e:
+            raise ValueError(f"{f.name}: {e}")
+        skip = 0
+        frames.append(fr); used.append(f.name); rows_read += info["rows_read"]; last = info
+        for k, v in info["label_counts"].items():
+            counts[k] = counts.get(k, 0) + v
+        if remaining is not None:
+            remaining -= info["rows_read"]
+    if not frames:
+        raise ValueError("'Rows to skip first' is larger than the data in the folder.")
+    out = pd.concat(frames, ignore_index=True).sort_values("time").reset_index(drop=True)
+    return out, {"columns_used": last["columns_used"], "rows_read": rows_read, "rows_kept": len(out),
+                 "label_counts": counts, "files_used": used}
+
+
+def _load_one_csv(source, max_rows, skip_rows, deauth_only):
     cols = list(pd.read_csv(source, nrows=0).columns)
     if hasattr(source, "seek"):
         source.seek(0)
     lower = {c.lower(): c for c in cols}
 
     found = {k: list(dict.fromkeys(lower[a.lower()] for a in names if a.lower() in lower)) for k, names in _ALIASES.items()}
-    if not found["time"] or not found["src"] or not found["subtype"]:
-        raise ValueError(
-            "This CSV does not have the columns the loader needs (frame.time_epoch, wlan.sa/wlan.ta, "
-            "wlan.fc.type_subtype). Columns found: " + ", ".join(cols[:40]) + (" ..." if len(cols) > 40 else ""))
-    if not found["label"]:
-        raise ValueError("No label column found (expected 'Label'). Columns found: " + ", ".join(cols[:40]))
+    missing = [name for name, key in (("frame.time_epoch", "time"), ("wlan.sa or wlan.ta", "src"),
+                                      ("wlan.fc.type_subtype or wlan.fc.subtype", "subtype"),
+                                      ("Label", "label")) if not found[key]]
+    if "wlan.fc.type_subtype" not in lower and "wlan.fc.subtype" in lower and not found["ftype"]:
+        missing.append("wlan.fc.type")
+    if missing:
+        raise ValueError("Missing columns: " + ", ".join(missing) + ". All columns in this file: " + ", ".join(cols))
 
     usecols = sorted({c for v in found.values() for c in v})
     raw = pd.read_csv(source, usecols=usecols, nrows=max_rows, dtype=str, low_memory=False,
