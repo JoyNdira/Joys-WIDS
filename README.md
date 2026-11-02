@@ -80,7 +80,7 @@ Fill in after training on AWID3:
 - Only deauth/disassoc floods are targeted. Other AWID3 attacks (evil twin, Kr00k, rogue AP) are future work.
 - Live capture needs Linux, root and an adapter in monitor mode, and has not been tested on hardware.
 
-## 7. AI assistance statement (edit to match your use)
+## 7. AI assistance statement 
 
-AI coding assistants (Claude) were used to generate the initial code structure and GUI. The author reviewed
+AI coding assistants (Claude) were used to generate the initial code structure and GUI. I, Joy Ndira, reviewed
 the code, tested it on AWID3, and can explain each stage of the pipeline.
